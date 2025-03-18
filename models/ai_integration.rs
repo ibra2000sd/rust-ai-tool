@@ -9,6 +9,7 @@
 use crate::{AiModelConfig, AiModelType, Result, RustAiToolError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use log::{debug, info, warn, error};
 
 /// AI completion request
 #[derive(Debug, Serialize)]
@@ -281,6 +282,8 @@ impl AiModelClient {
             completion: String,
         }
         
+        debug!("Sending request to Claude AI");
+        
         let claude_request = ClaudeRequest {
             model: "claude-3-opus-20240229".to_string(), // Use appropriate model version
             prompt: request.prompt,
@@ -316,6 +319,8 @@ impl AiModelClient {
             .json::<ClaudeResponse>()
             .await
             .map_err(|e| RustAiToolError::AiModel(format!("Failed to parse Claude response: {}", e)))?;
+        
+        debug!("Received response from Claude AI");
         
         Ok(CompletionResponse {
             content: claude_response.completion,
@@ -366,6 +371,8 @@ impl AiModelClient {
             choices: Vec<GptResponseChoice>,
             usage: Option<GptResponseUsage>,
         }
+        
+        debug!("Sending request to OpenAI GPT");
         
         let mut messages = Vec::new();
         
@@ -430,6 +437,8 @@ impl AiModelClient {
             total_tokens: u.total_tokens,
         });
         
+        debug!("Received response from OpenAI GPT");
+        
         Ok(CompletionResponse {
             content,
             finish_reason,
@@ -479,6 +488,8 @@ impl AiModelClient {
             choices: Vec<MistralResponseChoice>,
             usage: Option<MistralResponseUsage>,
         }
+        
+        debug!("Sending request to Mistral AI");
         
         let mut messages = Vec::new();
         
@@ -543,6 +554,8 @@ impl AiModelClient {
             total_tokens: u.total_tokens,
         });
         
+        debug!("Received response from Mistral AI");
+        
         Ok(CompletionResponse {
             content,
             finish_reason,
@@ -585,6 +598,8 @@ impl AiModelClient {
             done: bool,
         }
         
+        debug!("Sending request to local Ollama model: {}", model_name);
+        
         let ollama_request = OllamaRequest {
             model: model_name.to_string(),
             prompt: request.prompt,
@@ -620,6 +635,8 @@ impl AiModelClient {
             .json::<OllamaResponse>()
             .await
             .map_err(|e| RustAiToolError::AiModel(format!("Failed to parse Ollama response: {}", e)))?;
+        
+        debug!("Received response from local Ollama model");
         
         Ok(CompletionResponse {
             content: ollama_response.response,

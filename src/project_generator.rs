@@ -7,10 +7,13 @@
 
 use crate::{Result, RustAiToolError, AiModelConfig};
 use std::path::{Path, PathBuf};
+use std::fs;
 use tokio::process::Command;
+use log::{debug, info, warn, error};
+use serde::{Serialize, Deserialize};
 
 /// Project template
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProjectTemplate {
     /// Basic Rust binary
     Basic,
@@ -27,12 +30,27 @@ pub enum ProjectTemplate {
     /// Tauri desktop application
     TauriApp,
     
+    /// Web service with Axum
+    Axum,
+    
+    /// REST API with Rocket
+    RocketApi,
+    
+    /// WebAssembly project
+    WasmProject,
+    
+    /// Embedded Rust project
+    EmbeddedRust,
+    
+    /// Machine Learning project
+    MachineLearning,
+    
     /// Custom template
     Custom(String),
 }
 
 /// Configuration for project generation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
     /// Project name
     pub name: String,
@@ -50,6 +68,7 @@ pub struct ProjectConfig {
     pub crate_type: String,
     
     /// Output directory
+    #[serde(skip)]
     pub output_dir: PathBuf,
     
     /// Whether to initialize a Git repository
@@ -59,6 +78,7 @@ pub struct ProjectConfig {
     pub dependencies: Vec<String>,
     
     /// AI model configuration for code generation
+    #[serde(skip)]
     pub ai_model: Option<AiModelConfig>,
 }
 
@@ -80,7 +100,7 @@ pub async fn generate_project_from_description(
     name: &str,
     ai_model: &AiModelConfig,
 ) -> Result<PathBuf> {
-    log::info!("Generating project from description: {}", description);
+    info!("Generating project from description: {}", description);
     
     // Create a project configuration based on the description
     let config = analyze_description(description, output_dir, name, ai_model).await?;
@@ -107,20 +127,9 @@ async fn analyze_description(
     name: &str,
     ai_model: &AiModelConfig,
 ) -> Result<ProjectConfig> {
-    // In a real implementation, this would use AI to analyze the description
-    // For now, we'll use a simple heuristic
-    
-    let template = if description.contains("web") || description.contains("server") || description.contains("api") {
-        ProjectTemplate::WebService
-    } else if description.contains("desktop") || description.contains("gui") || description.contains("tauri") {
-        ProjectTemplate::TauriApp
-    } else if description.contains("cli") || description.contains("command") {
-        ProjectTemplate::Cli
-    } else if description.contains("library") || description.contains("lib") {
-        ProjectTemplate::Library
-    } else {
-        ProjectTemplate::Basic
-    };
+    // Choose the appropriate template based on the description
+    let template = determine_template(description);
+    debug!("Selected template: {:?}", template);
     
     let crate_type = match template {
         ProjectTemplate::Library => "lib".to_string(),
@@ -146,6 +155,34 @@ async fn analyze_description(
     })
 }
 
+/// Determine the best template for the project based on description
+fn determine_template(description: &str) -> ProjectTemplate {
+    let description = description.to_lowercase();
+    
+    // Check for specific keywords to select the appropriate template
+    if description.contains("wasm") || description.contains("webassembly") {
+        ProjectTemplate::WasmProject
+    } else if description.contains("embedded") || description.contains("microcontroller") || description.contains("arduino") {
+        ProjectTemplate::EmbeddedRust
+    } else if description.contains("machine learning") || description.contains("ml") || description.contains("ai") {
+        ProjectTemplate::MachineLearning
+    } else if description.contains("tauri") || description.contains("desktop app") || description.contains("gui") {
+        ProjectTemplate::TauriApp
+    } else if description.contains("axum") {
+        ProjectTemplate::Axum
+    } else if description.contains("rocket") || description.contains("rest api") {
+        ProjectTemplate::RocketApi
+    } else if description.contains("web") || description.contains("server") || description.contains("api") {
+        ProjectTemplate::WebService
+    } else if description.contains("cli") || description.contains("command") {
+        ProjectTemplate::Cli
+    } else if description.contains("library") || description.contains("lib") {
+        ProjectTemplate::Library
+    } else {
+        ProjectTemplate::Basic
+    }
+}
+
 /// Extract dependencies from a project description
 ///
 /// # Arguments
@@ -164,12 +201,60 @@ fn extract_dependencies(description: &str) -> Vec<String> {
         "rocket", "diesel", "sqlx", "rusqlite", "mongodb", "tauri",
         "egui", "wgpu", "image", "anyhow", "thiserror", "tracing",
         "log", "env_logger", "rand", "chrono", "uuid", "regex",
+        "axum", "wasm-bindgen", "web-sys", "js-sys", "linfa",
+        "embedded-hal", "cortex-m", "no_std", "alloc", "async-std",
     ];
     
     for crate_name in &known_crates {
-        if description.contains(crate_name) {
+        if description.to_lowercase().contains(crate_name) {
             dependencies.push(crate_name.to_string());
         }
+    }
+    
+    // Add template-specific dependencies
+    let template = determine_template(description);
+    match template {
+        ProjectTemplate::Cli => {
+            if !dependencies.contains(&"clap".to_string()) {
+                dependencies.push("clap".to_string());
+            }
+        },
+        ProjectTemplate::WebService => {
+            if !dependencies.contains(&"actix-web".to_string()) {
+                dependencies.push("actix-web".to_string());
+            }
+        },
+        ProjectTemplate::Axum => {
+            if !dependencies.contains(&"axum".to_string()) {
+                dependencies.push("axum".to_string());
+            }
+        },
+        ProjectTemplate::RocketApi => {
+            if !dependencies.contains(&"rocket".to_string()) {
+                dependencies.push("rocket".to_string());
+            }
+        },
+        ProjectTemplate::TauriApp => {
+            if !dependencies.contains(&"tauri".to_string()) {
+                dependencies.push("tauri".to_string());
+            }
+        },
+        ProjectTemplate::WasmProject => {
+            if !dependencies.contains(&"wasm-bindgen".to_string()) {
+                dependencies.push("wasm-bindgen".to_string());
+            }
+        },
+        ProjectTemplate::EmbeddedRust => {
+            if !dependencies.contains(&"embedded-hal".to_string()) {
+                dependencies.push("embedded-hal".to_string());
+            }
+        },
+        ProjectTemplate::MachineLearning => {
+            if !dependencies.contains(&"linfa".to_string()) {
+                dependencies.push("linfa".to_string());
+            }
+        },
+        _ => {}
     }
     
     dependencies
@@ -188,7 +273,7 @@ pub async fn generate_project(config: &ProjectConfig) -> Result<PathBuf> {
     let project_dir = config.output_dir.join(&config.name);
     
     // Create the project directory
-    std::fs::create_dir_all(&project_dir)
+    fs::create_dir_all(&project_dir)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Initialize Cargo project
@@ -237,7 +322,7 @@ async fn update_cargo_toml(project_dir: &Path, config: &ProjectConfig) -> Result
     let cargo_toml_path = project_dir.join("Cargo.toml");
     
     // Read the existing Cargo.toml
-    let cargo_toml = std::fs::read_to_string(&cargo_toml_path)
+    let cargo_toml = fs::read_to_string(&cargo_toml_path)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Parse it
@@ -282,13 +367,94 @@ async fn update_cargo_toml(project_dir: &Path, config: &ProjectConfig) -> Result
     if let Some(deps) = cargo_doc.get_mut("dependencies") {
         if let Some(table) = deps.as_table_mut() {
             for dep in &config.dependencies {
-                table.insert(dep, toml::value::Value::String("*".to_string()));
+                // Handle special cases for specific dependencies
+                if dep == "clap" {
+                    // Add clap with features
+                    table.insert(
+                        "clap",
+                        toml::value::Value::Table({
+                            let mut t = toml::Table::new();
+                            t.insert(
+                                "version".to_string(),
+                                toml::value::Value::String("4.3".to_string()),
+                            );
+                            t.insert(
+                                "features".to_string(),
+                                toml::value::Value::Array(vec![
+                                    toml::value::Value::String("derive".to_string()),
+                                ]),
+                            );
+                            t
+                        }),
+                    );
+                } else if dep == "tokio" {
+                    // Add tokio with features
+                    table.insert(
+                        "tokio",
+                        toml::value::Value::Table({
+                            let mut t = toml::Table::new();
+                            t.insert(
+                                "version".to_string(),
+                                toml::value::Value::String("1.28".to_string()),
+                            );
+                            t.insert(
+                                "features".to_string(),
+                                toml::value::Value::Array(vec![
+                                    toml::value::Value::String("full".to_string()),
+                                ]),
+                            );
+                            t
+                        }),
+                    );
+                } else if dep == "serde" {
+                    // Add serde with features
+                    table.insert(
+                        "serde",
+                        toml::value::Value::Table({
+                            let mut t = toml::Table::new();
+                            t.insert(
+                                "version".to_string(),
+                                toml::value::Value::String("1.0".to_string()),
+                            );
+                            t.insert(
+                                "features".to_string(),
+                                toml::value::Value::Array(vec![
+                                    toml::value::Value::String("derive".to_string()),
+                                ]),
+                            );
+                            t
+                        }),
+                    );
+                } else if dep == "tauri" {
+                    // Add tauri with features
+                    table.insert(
+                        "tauri",
+                        toml::value::Value::Table({
+                            let mut t = toml::Table::new();
+                            t.insert(
+                                "version".to_string(),
+                                toml::value::Value::String("1.4".to_string()),
+                            );
+                            t.insert(
+                                "features".to_string(),
+                                toml::value::Value::Array(vec![
+                                    toml::value::Value::String("dialog".to_string()),
+                                    toml::value::Value::String("fs".to_string()),
+                                ]),
+                            );
+                            t
+                        }),
+                    );
+                } else {
+                    // Default for other dependencies
+                    table.insert(dep, toml::value::Value::String("*".to_string()));
+                }
             }
         }
     }
     
     // Write the updated Cargo.toml
-    std::fs::write(&cargo_toml_path, cargo_doc.to_string())
+    fs::write(&cargo_toml_path, cargo_doc.to_string())
         .map_err(|e| RustAiToolError::Io(e))?;
     
     Ok(())
@@ -310,6 +476,7 @@ fn extract_keywords(description: &str) -> Vec<String> {
     let common_keywords = [
         "web", "cli", "api", "server", "client", "database", "gui", "game",
         "tool", "utility", "library", "framework", "desktop", "mobile",
+        "wasm", "ai", "ml", "embedded", "async", "blockchain"
     ];
     
     for keyword in &common_keywords {
@@ -340,7 +507,12 @@ async fn generate_project_files(project_dir: &Path, config: &ProjectConfig) -> R
         ProjectTemplate::Library => generate_library_project(project_dir, config).await?,
         ProjectTemplate::Cli => generate_cli_project(project_dir, config).await?,
         ProjectTemplate::WebService => generate_web_service_project(project_dir, config).await?,
+        ProjectTemplate::Axum => generate_axum_project(project_dir, config).await?,
+        ProjectTemplate::RocketApi => generate_rocket_project(project_dir, config).await?,
         ProjectTemplate::TauriApp => generate_tauri_project(project_dir, config).await?,
+        ProjectTemplate::WasmProject => generate_wasm_project(project_dir, config).await?,
+        ProjectTemplate::EmbeddedRust => generate_embedded_project(project_dir, config).await?,
+        ProjectTemplate::MachineLearning => generate_ml_project(project_dir, config).await?,
         ProjectTemplate::Custom(template_path) => {
             generate_custom_project(project_dir, config, template_path).await?
         },
@@ -370,7 +542,7 @@ async fn generate_basic_project(project_dir: &Path, config: &ProjectConfig) -> R
         config.name, config.description
     );
     
-    std::fs::write(&readme_path, readme_content)
+    fs::write(&readme_path, readme_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Create a .gitignore
@@ -380,7 +552,7 @@ async fn generate_basic_project(project_dir: &Path, config: &ProjectConfig) -> R
 Cargo.lock
 "#;
     
-    std::fs::write(&gitignore_path, gitignore_content)
+    fs::write(&gitignore_path, gitignore_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // If we have an AI model, we can also generate some initial code
@@ -424,8 +596,8 @@ async fn generate_library_project(project_dir: &Path, config: &ProjectConfig) ->
 /// # Examples
 ///
 /// ```
-/// // Example usage
-/// ```
+//! // Example usage
+//! ```
 pub fn example_function() -> bool {{
     true
 }}
@@ -443,12 +615,12 @@ mod tests {{
         config.name, config.description
     );
     
-    std::fs::write(&lib_rs_path, lib_rs_content)
+    fs::write(&lib_rs_path, lib_rs_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Create examples directory with a simple example
     let examples_dir = project_dir.join("examples");
-    std::fs::create_dir_all(&examples_dir)
+    fs::create_dir_all(&examples_dir)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     let example_path = examples_dir.join("simple_example.rs");
@@ -460,7 +632,7 @@ mod tests {{
         config.name, config.name.replace('-', "_")
     );
     
-    std::fs::write(&example_path, example_content)
+    fs::write(&example_path, example_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     Ok(())
@@ -547,7 +719,7 @@ fn main() {{
         config.name, config.description
     );
     
-    std::fs::write(&main_rs_path, main_rs_content)
+    fs::write(&main_rs_path, main_rs_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Update Cargo.toml to add clap and logging dependencies if not already added
@@ -556,7 +728,7 @@ fn main() {{
     
     if !dependencies.is_empty() {
         let cargo_toml_path = project_dir.join("Cargo.toml");
-        let cargo_toml = std::fs::read_to_string(&cargo_toml_path)
+        let cargo_toml = fs::read_to_string(&cargo_toml_path)
             .map_err(|e| RustAiToolError::Io(e))?;
         
         let mut cargo_doc = cargo_toml.parse::<toml::Document>()
@@ -591,14 +763,14 @@ fn main() {{
             }
         }
         
-        std::fs::write(&cargo_toml_path, cargo_doc.to_string())
+        fs::write(&cargo_toml_path, cargo_doc.to_string())
             .map_err(|e| RustAiToolError::Io(e))?;
     }
     
     Ok(())
 }
 
-/// Generate a web service Rust project
+/// Generate a web service Rust project with Actix
 ///
 /// # Arguments
 ///
@@ -614,11 +786,11 @@ async fn generate_web_service_project(project_dir: &Path, config: &ProjectConfig
     
     // Create src directory structure
     let src_dir = project_dir.join("src");
-    std::fs::create_dir_all(&src_dir.join("routes"))
+    fs::create_dir_all(&src_dir.join("routes"))
         .map_err(|e| RustAiToolError::Io(e))?;
-    std::fs::create_dir_all(&src_dir.join("models"))
+    fs::create_dir_all(&src_dir.join("models"))
         .map_err(|e| RustAiToolError::Io(e))?;
-    std::fs::create_dir_all(&src_dir.join("handlers"))
+    fs::create_dir_all(&src_dir.join("handlers"))
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Create main.rs with web server setup
@@ -664,7 +836,7 @@ async fn main() -> std::io::Result<()> {{
         config.name, config.name
     );
     
-    std::fs::write(&main_rs_path, main_rs_content)
+    fs::write(&main_rs_path, main_rs_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Create routes.rs
@@ -680,7 +852,7 @@ pub fn init_routes(cfg: &mut web::ServiceConfig) {
 }
 "#;
     
-    std::fs::write(&routes_rs_path, routes_rs_content)
+    fs::write(&routes_rs_path, routes_rs_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Create handlers.rs
@@ -704,7 +876,7 @@ pub async fn get_example() -> impl Responder {
 }
 "#;
     
-    std::fs::write(&handlers_rs_path, handlers_rs_content)
+    fs::write(&handlers_rs_path, handlers_rs_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Create models.rs
@@ -719,7 +891,7 @@ pub struct ExampleModel {
 }
 "#;
     
-    std::fs::write(&models_rs_path, models_rs_content)
+    fs::write(&models_rs_path, models_rs_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
     // Update Cargo.toml to add web service dependencies
@@ -735,7 +907,7 @@ pub struct ExampleModel {
     
     if !dependencies.is_empty() {
         let cargo_toml_path = project_dir.join("Cargo.toml");
-        let cargo_toml = std::fs::read_to_string(&cargo_toml_path)
+        let cargo_toml = fs::read_to_string(&cargo_toml_path)
             .map_err(|e| RustAiToolError::Io(e))?;
         
         let mut cargo_doc = cargo_toml.parse::<toml::Document>()
@@ -789,14 +961,14 @@ pub struct ExampleModel {
             }
         }
         
-        std::fs::write(&cargo_toml_path, cargo_doc.to_string())
+        fs::write(&cargo_toml_path, cargo_doc.to_string())
             .map_err(|e| RustAiToolError::Io(e))?;
     }
     
     Ok(())
 }
 
-/// Generate a Tauri desktop application project
+/// Generate a web service Rust project with Axum
 ///
 /// # Arguments
 ///
@@ -806,267 +978,142 @@ pub struct ExampleModel {
 /// # Returns
 ///
 /// Success status
-async fn generate_tauri_project(project_dir: &Path, config: &ProjectConfig) -> Result<()> {
+async fn generate_axum_project(project_dir: &Path, config: &ProjectConfig) -> Result<()> {
     // Create a basic project first
     generate_basic_project(project_dir, config).await?;
     
-    // To initialize a Tauri project, we need to run Tauri CLI
-    // This is complex and would involve Node.js setup as well
-    // For simplicity, we'll just set up a skeleton
-    
-    // Create src-tauri directory
-    let src_tauri_dir = project_dir.join("src-tauri");
-    std::fs::create_dir_all(&src_tauri_dir.join("src"))
+    // Create src directory structure
+    let src_dir = project_dir.join("src");
+    fs::create_dir_all(&src_dir.join("routes"))
+        .map_err(|e| RustAiToolError::Io(e))?;
+    fs::create_dir_all(&src_dir.join("models"))
+        .map_err(|e| RustAiToolError::Io(e))?;
+    fs::create_dir_all(&src_dir.join("handlers"))
         .map_err(|e| RustAiToolError::Io(e))?;
     
-    // Create main.rs for Tauri
-    let main_rs_path = src_tauri_dir.join("src").join("main.rs");
+    // Create main.rs with Axum setup
+    let main_rs_path = src_dir.join("main.rs");
     let main_rs_content = format!(
-        r#"#![cfg_attr(
-  all(not(debug_assertions), target_os = "windows"),
-  windows_subsystem = "windows"
-)]
-
-use tauri::{{Window, Manager}};
+        r#"use axum::{{
+    extract::Extension,
+    routing::{{get, post}},
+    Router,
+}};
 use serde::{{Deserialize, Serialize}};
+use std::net::SocketAddr;
+
+mod routes;
+mod models;
+mod handlers;
+
+#[tokio::main]
+async fn main() {{
+    // Initialize logger
+    tracing_subscriber::fmt::init();
+    
+    // Build our application
+    let app = Router::new()
+        .route("/health", get(health_check))
+        .nest("/api", routes::api_routes());
+    
+    // Run it
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    tracing::info!("Starting {} server at http://localhost:8080", "{}");
+    
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
+}}
+
+#[derive(Serialize)]
+struct HealthResponse {{
+    status: String,
+    message: String,
+}}
+
+// Basic health check handler
+async fn health_check() -> axum::Json<HealthResponse> {{
+    axum::Json(HealthResponse {{
+        status: "ok".to_string(),
+        message: "Service is running".to_string(),
+    }})
+}}
+"#,
+        config.name, config.name
+    );
+    
+    fs::write(&main_rs_path, main_rs_content)
+        .map_err(|e| RustAiToolError::Io(e))?;
+    
+    // Create routes.rs
+    let routes_rs_path = src_dir.join("routes.rs");
+    let routes_rs_content = r#"use axum::{
+    routing::{get, post},
+    Router,
+};
+use crate::handlers;
+
+pub fn api_routes() -> Router {
+    Router::new()
+        .route("/example", get(handlers::get_example))
+}
+"#;
+    
+    fs::write(&routes_rs_path, routes_rs_content)
+        .map_err(|e| RustAiToolError::Io(e))?;
+    
+    // Create handlers.rs
+    let handlers_rs_path = src_dir.join("handlers.rs");
+    let handlers_rs_content = r#"use axum::Json;
+use serde::Serialize;
+
+#[derive(Serialize)]
+pub struct ExampleResponse {
+    message: String,
+    data: Vec<String>,
+}
+
+pub async fn get_example() -> Json<ExampleResponse> {
+    Json(ExampleResponse {
+        message: "Example endpoint".to_string(),
+        data: vec!["item1".to_string(), "item2".to_string()],
+    })
+}
+"#;
+    
+    fs::write(&handlers_rs_path, handlers_rs_content)
+        .map_err(|e| RustAiToolError::Io(e))?;
+    
+    // Create models.rs
+    let models_rs_path = src_dir.join("models.rs");
+    let models_rs_content = r#"use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ExampleResponse {{
-  message: String,
-  success: bool,
-}}
-
-#[tauri::command]
-fn example_command(name: &str) -> ExampleResponse {{
-  ExampleResponse {{
-    message: format!("Hello, {{}}!", name),
-    success: true,
-  }}
-}}
-
-fn main() {{
-  tauri::Builder::default()
-    .setup(|app| {{
-      // Initialize application
-      #[cfg(debug_assertions)]
-      {{
-        let window = app.get_window("main").unwrap();
-        window.open_devtools();
-      }}
-      Ok(())
-    }})
-    .invoke_handler(tauri::generate_handler![example_command])
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
-}}
-"#,
-        config.name
-    );
+pub struct ExampleModel {
+    pub id: u32,
+    pub name: String,
+    pub active: bool,
+}
+"#;
     
-    std::fs::write(&main_rs_path, main_rs_content)
+    fs::write(&models_rs_path, models_rs_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
-    // Create tauri.conf.json
-    let tauri_conf_path = src_tauri_dir.join("tauri.conf.json");
-    let tauri_conf_content = format!(
-        r#"{{
-  "$schema": "https://tauri.app/v1/config-schema.json",
-  "build": {{
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
-    "devPath": "../src",
-    "distDir": "../src",
-    "withGlobalTauri": true
-  }},
-  "package": {{
-    "productName": "{}",
-    "version": "0.1.0"
-  }},
-  "tauri": {{
-    "allowlist": {{
-      "all": false,
-      "dialog": {{
-        "all": true
-      }},
-      "fs": {{
-        "all": true,
-        "scope": ["$APP/*"]
-      }}
-    }},
-    "bundle": {{
-      "active": true,
-      "icon": [
-        "icons/32x32.png",
-        "icons/128x128.png",
-        "icons/128x128@2x.png",
-        "icons/icon.icns",
-        "icons/icon.ico"
-      ],
-      "identifier": "com.example.{}",
-      "targets": "all"
-    }},
-    "security": {{
-      "csp": null
-    }},
-    "windows": [
-      {{
-        "fullscreen": false,
-        "resizable": true,
-        "title": "{}",
-        "width": 800,
-        "height": 600
-      }}
-    ]
-  }}
-}}
-"#,
-        config.name,
-        config.name.replace('-', ""),
-        config.name
-    );
-    
-    std::fs::write(&tauri_conf_path, tauri_conf_content)
-        .map_err(|e| RustAiToolError::Io(e))?;
-    
-    // Create a simple frontend
-    let src_dir = project_dir.join("src");
-    std::fs::create_dir_all(&src_dir)
-        .map_err(|e| RustAiToolError::Io(e))?;
-    
-    let index_html_path = src_dir.join("index.html");
-    let index_html_content = format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{}</title>
-  <style>
-    body {{
-      font-family: Arial, sans-serif;
-      margin: 0;
-      padding: 20px;
-    }}
-    h1 {{
-      color: #333;
-    }}
-    button {{
-      padding: 8px 16px;
-      background-color: #4CAF50;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-    }}
-    button:hover {{
-      background-color: #45a049;
-    }}
-    #response {{
-      margin-top: 20px;
-      padding: 10px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      display: none;
-    }}
-  </style>
-</head>
-<body>
-  <h1>{}</h1>
-  <p>{}</p>
-  
-  <div>
-    <input type="text" id="nameInput" placeholder="Enter your name">
-    <button id="greetButton">Greet</button>
-  </div>
-  
-  <div id="response"></div>
-
-  <script>
-    // Wait for Tauri API to be ready
-    document.addEventListener('DOMContentLoaded', () => {{
-      // We need to check if we're running in Tauri
-      const isTauri = window.__TAURI__ !== undefined;
-      
-      const nameInput = document.getElementById('nameInput');
-      const greetButton = document.getElementById('greetButton');
-      const responseDiv = document.getElementById('response');
-      
-      greetButton.addEventListener('click', async () => {{
-        const name = nameInput.value || 'World';
-        
-        if (isTauri) {{
-          // Call Tauri command
-          const response = await window.__TAURI__.invoke('example_command', {{ name }});
-          responseDiv.textContent = response.message;
-          responseDiv.style.display = 'block';
-        }} else {{
-          // Fallback for browser
-          responseDiv.textContent = `Hello, ${{name}}! (Tauri API not available)`;
-          responseDiv.style.display = 'block';
-        }}
-      }});
-    }});
-  </script>
-</body>
-</html>
-"#,
-        config.name,
-        config.name,
-        config.description
-    );
-    
-    std::fs::write(&index_html_path, index_html_content)
-        .map_err(|e| RustAiToolError::Io(e))?;
-    
-    // Create a README with Tauri-specific instructions
-    let readme_path = project_dir.join("README.md");
-    let readme_content = format!(
-        r#"# {}
-
-{}
-
-## Prerequisites
-
-- Rust
-- Node.js
-- Tauri CLI (`cargo install tauri-cli`)
-
-## Development
-
-```bash
-# Install dependencies
-cargo install tauri-cli
-
-# Run in development mode
-cargo tauri dev
-
-# Build for production
-cargo tauri build
-```
-
-## Features
-
-- Cross-platform desktop application
-- Rust backend with Tauri
-- Simple HTML/CSS/JS frontend
-"#,
-        config.name, config.description
-    );
-    
-    std::fs::write(&readme_path, readme_content)
-        .map_err(|e| RustAiToolError::Io(e))?;
-    
-    // Update Cargo.toml to add Tauri dependencies
+    // Update Cargo.toml to add Axum dependencies
     let mut dependencies = vec![
-        "tauri".to_string(),
+        "axum".to_string(),
+        "tokio".to_string(),
         "serde".to_string(),
         "serde_json".to_string(),
+        "tracing".to_string(),
+        "tracing-subscriber".to_string(),
     ];
     dependencies.retain(|d| !config.dependencies.contains(d));
     
     if !dependencies.is_empty() {
         let cargo_toml_path = project_dir.join("Cargo.toml");
-        let cargo_toml = std::fs::read_to_string(&cargo_toml_path)
+        let cargo_toml = fs::read_to_string(&cargo_toml_path)
             .map_err(|e| RustAiToolError::Io(e))?;
         
         let mut cargo_doc = cargo_toml.parse::<toml::Document>()
@@ -1075,28 +1122,26 @@ cargo tauri build
         if let Some(deps) = cargo_doc.get_mut("dependencies") {
             if let Some(table) = deps.as_table_mut() {
                 for dep in dependencies {
-                    if dep == "tauri" {
-                        // Add tauri with features
+                    if dep == "tokio" {
                         table.insert(
-                            "tauri",
+                            "tokio",
                             toml::value::Value::Table({
                                 let mut t = toml::Table::new();
                                 t.insert(
                                     "version".to_string(),
-                                    toml::value::Value::String("1.4".to_string()),
+                                    toml::value::Value::String("1.28".to_string()),
                                 );
                                 t.insert(
                                     "features".to_string(),
                                     toml::value::Value::Array(vec![
-                                        toml::value::Value::String("dialog".to_string()),
-                                        toml::value::Value::String("fs".to_string()),
+                                        toml::value::Value::String("full".to_string()),
+                                        toml::value::Value::String("rt-multi-thread".to_string()),
                                     ]),
                                 );
                                 t
                             }),
                         );
                     } else if dep == "serde" {
-                        // Add serde with features
                         table.insert(
                             "serde",
                             toml::value::Value::Table({
@@ -1121,167 +1166,156 @@ cargo tauri build
             }
         }
         
-        std::fs::write(&cargo_toml_path, cargo_doc.to_string())
+        fs::write(&cargo_toml_path, cargo_doc.to_string())
             .map_err(|e| RustAiToolError::Io(e))?;
     }
     
     Ok(())
 }
 
-/// Generate a custom Rust project from a template
+/// Generate a Rocket web API project
 ///
 /// # Arguments
 ///
 /// * `project_dir` - Project directory
 /// * `config` - Project configuration
-/// * `template_path` - Path to the template
 ///
 /// # Returns
 ///
 /// Success status
-async fn generate_custom_project(project_dir: &Path, config: &ProjectConfig, template_path: &str) -> Result<()> {
+async fn generate_rocket_project(project_dir: &Path, config: &ProjectConfig) -> Result<()> {
     // Create a basic project first
     generate_basic_project(project_dir, config).await?;
     
-    // In a real implementation, this would copy files from a template directory
-    // and replace template variables with values from the configuration
-    
-    log::info!("Using custom template: {}", template_path);
-    log::warn!("Custom template support is limited. Using basic project instead.");
-    
-    // For now, we'll just note that the user wanted to use a custom template
-    let readme_path = project_dir.join("README.md");
-    if readme_path.exists() {
-        let content = std::fs::read_to_string(&readme_path)
-            .map_err(|e| RustAiToolError::Io(e))?;
-        
-        let updated_content = format!(
-            "{}\n\n> Note: This project was based on the custom template: {}\n",
-            content, template_path
-        );
-        
-        std::fs::write(&readme_path, updated_content)
-            .map_err(|e| RustAiToolError::Io(e))?;
-    }
-    
-    Ok(())
-}
-
-/// Initialize a Git repository
-///
-/// # Arguments
-///
-/// * `project_dir` - Project directory
-///
-/// # Returns
-///
-/// Success status
-async fn init_git_repository(project_dir: &Path) -> Result<()> {
-    // Initialize Git repository
-    let init_result = Command::new("git")
-        .arg("init")
-        .current_dir(project_dir)
-        .status()
-        .await
+    // Create src directory structure
+    let src_dir = project_dir.join("src");
+    fs::create_dir_all(&src_dir.join("routes"))
+        .map_err(|e| RustAiToolError::Io(e))?;
+    fs::create_dir_all(&src_dir.join("models"))
         .map_err(|e| RustAiToolError::Io(e))?;
     
-    if !init_result.success() {
-        return Err(RustAiToolError::ProjectGeneration(format!(
-            "Failed to initialize Git repository (exit code: {:?})",
-            init_result.code()
-        )));
-    }
-    
-    // Add all files
-    let add_result = Command::new("git")
-        .args(&["add", "."])
-        .current_dir(project_dir)
-        .status()
-        .await
-        .map_err(|e| RustAiToolError::Io(e))?;
-    
-    if !add_result.success() {
-        return Err(RustAiToolError::ProjectGeneration(format!(
-            "Failed to add files to Git repository (exit code: {:?})",
-            add_result.code()
-        )));
-    }
-    
-    // Commit
-    let commit_result = Command::new("git")
-        .args(&["commit", "-m", "Initial commit"])
-        .current_dir(project_dir)
-        .status()
-        .await
-        .map_err(|e| RustAiToolError::Io(e))?;
-    
-    if !commit_result.success() {
-        log::warn!("Failed to create initial commit. This is not fatal, but you should commit your changes manually.");
-    }
-    
-    Ok(())
-}
-
-/// Generate main.rs content using AI
-///
-/// # Arguments
-///
-/// * `project_dir` - Project directory
-/// * `config` - Project configuration
-/// * `ai_model` - AI model configuration
-///
-/// # Returns
-///
-/// Success status
-async fn generate_main_rs_with_ai(
-    project_dir: &Path,
-    config: &ProjectConfig,
-    ai_model: &AiModelConfig,
-) -> Result<()> {
-    log::info!("Generating main.rs content with AI...");
-    
-    // In a real implementation, this would call an AI API to generate code
-    // For now, we'll just create a placeholder
-    
-    let main_rs_path = project_dir.join("src").join("main.rs");
+    // Create main.rs with Rocket setup
+    let main_rs_path = src_dir.join("main.rs");
     let main_rs_content = format!(
-        r#"// This file was generated with AI assistance
-// Project: {}
-// Description: {}
+        r#"#[macro_use] extern crate rocket;
+use rocket::serde::{{Serialize, json::Json}};
 
-fn main() {{
-    println!("Hello from {}!");
-    println!("Description: {{}}", env!("CARGO_PKG_DESCRIPTION"));
-    
-    run_example();
+mod routes;
+mod models;
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct HealthResponse {{
+    status: String,
+    message: String,
 }}
 
-fn run_example() {{
-    println!("Running example functionality...");
-    
-    // Example code would be generated here based on the project description
-    // For a more complete implementation, we would use the AI model to
-    // generate appropriate starter code for the project
+#[get("/health")]
+fn health_check() -> Json<HealthResponse> {{
+    Json(HealthResponse {{
+        status: "ok".to_string(),
+        message: "Service is running".to_string(),
+    }})
 }}
 
-#[cfg(test)]
-mod tests {{
-    use super::*;
+#[launch]
+fn rocket() -> _ {{
+    println!("Starting {} server", "{}");
     
-    #[test]
-    fn test_example() {{
-        // Example test would be generated here
-        assert!(true);
-    }}
+    rocket::build()
+        .mount("/", routes![health_check])
+        .mount("/api", routes::routes())
 }}
 "#,
-        config.name,
-        config.description,
-        config.name
+        config.name, config.name
     );
     
-    std::fs::write(&main_rs_path, main_rs_content)
+    fs::write(&main_rs_path, main_rs_content)
         .map_err(|e| RustAiToolError::Io(e))?;
+    
+    // Create routes.rs
+    let routes_rs_path = src_dir.join("routes.rs");
+    let routes_rs_content = r#"use rocket::{serde::json::Json, Route};
+use crate::models::ExampleModel;
+
+#[get("/example")]
+fn example() -> Json<ExampleModel> {
+    Json(ExampleModel {
+        id: 1,
+        name: "Example".to_string(),
+        active: true,
+    })
+}
+
+pub fn routes() -> Vec<Route> {
+    routes![example]
+}
+"#;
+    
+    fs::write(&routes_rs_path, routes_rs_content)
+        .map_err(|e| RustAiToolError::Io(e))?;
+    
+    // Create models.rs
+    let models_rs_path = src_dir.join("models.rs");
+    let models_rs_content = r#"use rocket::serde::{Serialize, Deserialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+pub struct ExampleModel {
+    pub id: u32,
+    pub name: String,
+    pub active: bool,
+}
+"#;
+    
+    fs::write(&models_rs_path, models_rs_content)
+        .map_err(|e| RustAiToolError::Io(e))?;
+    
+    // Update Cargo.toml to add Rocket dependencies
+    let mut dependencies = vec![
+        "rocket".to_string(),
+    ];
+    dependencies.retain(|d| !config.dependencies.contains(d));
+    
+    if !dependencies.is_empty() {
+        let cargo_toml_path = project_dir.join("Cargo.toml");
+        let cargo_toml = fs::read_to_string(&cargo_toml_path)
+            .map_err(|e| RustAiToolError::Io(e))?;
+        
+        let mut cargo_doc = cargo_toml.parse::<toml::Document>()
+            .map_err(|e| RustAiToolError::ProjectGeneration(format!("Failed to parse Cargo.toml: {}", e)))?;
+        
+        if let Some(deps) = cargo_doc.get_mut("dependencies") {
+            if let Some(table) = deps.as_table_mut() {
+                for dep in dependencies {
+                    if dep == "rocket" {
+                        table.insert(
+                            "rocket",
+                            toml::value::Value::Table({
+                                let mut t = toml::Table::new();
+                                t.insert(
+                                    "version".to_string(),
+                                    toml::value::Value::String("0.5.0".to_string()),
+                                );
+                                t.insert(
+                                    "features".to_string(),
+                                    toml::value::Value::Array(vec![
+                                        toml::value::Value::String("json".to_string()),
+                                    ]),
+                                );
+                                t
+                            }),
+                        );
+                    } else {
+                        table.insert(dep, toml::value::Value::String("*".to_string()));
+                    }
+                }
+            }
+        }
+        
+        fs::write(&cargo_toml_path, cargo_doc.to_string())
+            .map_err(|e| RustAiToolError::Io(e))?;
+    }
     
     Ok(())
 }

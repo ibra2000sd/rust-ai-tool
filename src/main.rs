@@ -1,15 +1,18 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rust_ai_tool::{
-    analysis::analyze_project,
-    cli::execute_command,
+    analysis::{self, analyze_project, AnalysisResult},
+    cli,
     github::GithubClient,
-    project_generator::generate_project,
-    validation::validate_fixes,
-    Config,
+    modification::{apply_modifications, CodeModification, create_change_report},
+    project_generator::{generate_project_from_description, ProjectConfig, ProjectTemplate},
+    validation::{self, validate_fixes, FixToValidate, ValidationResult},
+    AiModelConfig, AiModelType, AnalysisOptions, Config, GitHubRepo, ValidationOptions,
 };
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+use tokio::runtime::Runtime;
 
 /// Rust AI-Powered Project Analyzer & Code Refactoring Tool
 #[derive(Parser, Debug)]
@@ -144,7 +147,8 @@ enum GitHubCommands {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Initialize logger
@@ -153,6 +157,7 @@ fn main() -> Result<()> {
     } else {
         log::LevelFilter::Info
     };
+    
     env_logger::Builder::new()
         .filter_level(log_level)
         .format_timestamp(None)
@@ -160,9 +165,20 @@ fn main() -> Result<()> {
 
     debug!("Parsed CLI arguments: {:#?}", cli);
 
-    // Load configuration
-    let config = load_config(&cli.config).context("Failed to load configuration")?;
-    debug!("Loaded configuration: {:#?}", config);
+    // Load configuration or create default
+    let config = match load_config(&cli.config) {
+        Ok(config) => {
+            debug!("Loaded configuration from {}", cli.config.display());
+            config
+        }
+        Err(e) => {
+            warn!("Failed to load configuration: {}", e);
+            warn!("Using default configuration");
+            create_default_config()
+        }
+    };
+
+    debug!("Using configuration: {:#?}", config);
 
     // Execute command
     match &cli.command {
@@ -172,9 +188,22 @@ fn main() -> Result<()> {
             file,
         } => {
             info!("Analyzing project at {}", project_path.display());
-            // This would call into your analyze_project function
-            // analyze_project(project_path, output, file)?;
-            println!("Analysis complete. Output format: {}", output);
+            
+            let results = analyze_project(project_path, &config.analysis_options)
+                .context("Failed to analyze project")?;
+            
+            let output_content = format_analysis_results(&results, output)?;
+            
+            if let Some(output_file) = file {
+                fs::write(output_file, &output_content)
+                    .context(format!("Failed to write output to {}", output_file.display()))?;
+                
+                info!("Analysis results written to {}", output_file.display());
+            } else {
+                println!("{}", output_content);
+            }
+            
+            info!("Analysis complete");
         }
         Commands::Validate { project_path, fixes } => {
             info!(
@@ -182,9 +211,29 @@ fn main() -> Result<()> {
                 project_path.display(),
                 fixes.display()
             );
-            // This would call into your validate_fixes function
-            // validate_fixes(project_path, fixes)?;
-            println!("Validation complete");
+            
+            let fixes_content = fs::read_to_string(fixes)
+                .context(format!("Failed to read fixes file: {}", fixes.display()))?;
+            
+            let fixes_to_validate: Vec<FixToValidate> = serde_json::from_str(&fixes_content)
+                .context("Failed to parse fixes JSON")?;
+            
+            let validation_results = validate_fixes(&fixes_to_validate, &config.validation_options)
+                .context("Failed to validate fixes")?;
+            
+            let valid_count = validation_results.iter().filter(|r| r.is_valid).count();
+            let total_count = validation_results.len();
+            
+            println!("Validation complete: {}/{} fixes are valid", valid_count, total_count);
+            
+            for (i, result) in validation_results.iter().enumerate() {
+                if !result.is_valid {
+                    println!("Fix #{} for {} is invalid:", i + 1, result.file_path.display());
+                    for msg in &result.messages {
+                        println!("  - {}: {}", msg.message_type, msg.text);
+                    }
+                }
+            }
         }
         Commands::Apply {
             project_path,
@@ -196,12 +245,24 @@ fn main() -> Result<()> {
                 project_path.display(),
                 fixes.display()
             );
+            
             if *backup {
                 info!("Creating backup before applying fixes");
             }
-            // This would call into your apply_fixes function
-            // apply_fixes(project_path, fixes, *backup)?;
-            println!("Fixes applied successfully");
+            
+            let fixes_content = fs::read_to_string(fixes)
+                .context(format!("Failed to read fixes file: {}", fixes.display()))?;
+            
+            let modifications: Vec<CodeModification> = serde_json::from_str(&fixes_content)
+                .context("Failed to parse fixes JSON")?;
+            
+            let changes = apply_modifications(&modifications, *backup)
+                .context("Failed to apply modifications")?;
+            
+            let report = create_change_report(&changes);
+            println!("{}", report);
+            
+            info!("Successfully applied {} changes", changes.len());
         }
         Commands::Generate {
             description,
@@ -213,9 +274,20 @@ fn main() -> Result<()> {
                 name,
                 output.display()
             );
-            // This would call into your generate_project function
-            // generate_project(description, output, name)?;
-            println!("Project generated successfully");
+            
+            if !output.exists() {
+                fs::create_dir_all(output)
+                    .context(format!("Failed to create output directory: {}", output.display()))?;
+            }
+            
+            let project_path = generate_project_from_description(
+                description,
+                output,
+                name,
+                &config.ai_model
+            ).await.context("Failed to generate project")?;
+            
+            info!("Project generated at {}", project_path.display());
         }
         Commands::GitHub { command } => match command {
             GitHubCommands::CreatePr {
@@ -229,9 +301,58 @@ fn main() -> Result<()> {
                     "Creating PR for {}/{} on branch {} with title: {}",
                     owner, repo, branch, title
                 );
-                // This would call into your GitHub integration
-                // create_pr(owner, repo, branch, title, fixes)?;
-                println!("Pull request created successfully");
+                
+                let github_config = config.github_repo.as_ref()
+                    .context("GitHub configuration not found in config file")?;
+                
+                let github = GithubClient::new(&github_config.access_token, owner, repo)
+                    .context("Failed to create GitHub client")?;
+                
+                // Get repo info
+                let repo_info = github.get_repo_info().await
+                    .context("Failed to get repository information")?;
+                
+                // Create a new branch if it doesn't exist
+                info!("Creating branch {} from {}", branch, repo_info.default_branch);
+                let _ = github.create_branch(&repo_info.default_branch, branch).await;
+                
+                // Clone the repository to a temporary directory
+                let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
+                let repo_path = github.clone_repo(Some(branch), temp_dir.path()).await
+                    .context("Failed to clone repository")?;
+                
+                // Read fixes
+                let fixes_content = fs::read_to_string(fixes)
+                    .context(format!("Failed to read fixes file: {}", fixes.display()))?;
+                
+                let modifications: Vec<CodeModification> = serde_json::from_str(&fixes_content)
+                    .context("Failed to parse fixes JSON")?;
+                
+                // Apply modifications
+                let changed_files: Vec<PathBuf> = modifications.iter()
+                    .map(|m| {
+                        let rel_path = m.file_path.strip_prefix(project_path).unwrap_or(&m.file_path);
+                        repo_path.join(rel_path)
+                    })
+                    .collect();
+                
+                // Commit and push changes
+                github.commit_changes(
+                    &repo_path,
+                    &changed_files,
+                    &format!("Applied fixes: {}", title),
+                    branch,
+                ).await.context("Failed to commit changes")?;
+                
+                // Create pull request
+                let pr = github.create_pull_request(
+                    title,
+                    &format!("Automatically generated fixes by Rust AI Tool"),
+                    branch,
+                    &repo_info.default_branch,
+                ).await.context("Failed to create pull request")?;
+                
+                println!("Pull request created successfully: {}", pr.url);
             }
             GitHubCommands::Analyze {
                 owner,
@@ -239,16 +360,48 @@ fn main() -> Result<()> {
                 branch,
             } => {
                 info!("Analyzing GitHub repository {}/{} on branch {}", owner, repo, branch);
-                // This would call into your GitHub integration
-                // analyze_github_repo(owner, repo, branch)?;
-                println!("GitHub repository analysis complete");
+                
+                let github_config = config.github_repo.as_ref()
+                    .context("GitHub configuration not found in config file")?;
+                
+                let github = GithubClient::new(&github_config.access_token, owner, repo)
+                    .context("Failed to create GitHub client")?;
+                
+                // Clone the repository to a temporary directory
+                let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
+                let repo_path = github.clone_repo(Some(branch), temp_dir.path()).await
+                    .context("Failed to clone repository")?;
+                
+                // Run analysis
+                let results = analyze_project(&repo_path, &config.analysis_options)
+                    .context("Failed to analyze project")?;
+                
+                // Output results
+                let output_content = format_analysis_results(&results, "markdown")?;
+                println!("{}", output_content);
+                
+                info!("GitHub repository analysis complete");
             }
         },
         Commands::Init { project_path } => {
             info!("Initializing configuration for project at {}", project_path.display());
-            // This would call into your init_config function
-            // init_config(project_path)?;
-            println!("Configuration initialized successfully");
+            
+            let config_path = project_path.join(".rust-ai-tool.toml");
+            
+            if config_path.exists() {
+                warn!("Configuration file already exists at {}", config_path.display());
+                warn!("Use --force to overwrite existing configuration");
+                return Ok(());
+            }
+            
+            let config = create_default_config();
+            let config_content = toml::to_string_pretty(&config)
+                .context("Failed to serialize configuration")?;
+            
+            fs::write(&config_path, config_content)
+                .context(format!("Failed to write configuration to {}", config_path.display()))?;
+            
+            info!("Configuration initialized at {}", config_path.display());
         }
     }
 
@@ -257,24 +410,145 @@ fn main() -> Result<()> {
 
 /// Load the configuration from a file
 fn load_config(config_path: &PathBuf) -> Result<Config> {
-    // This is a placeholder - you'd implement actual config loading
-    Ok(Config {
-        project_path: std::path::PathBuf::new(),
+    // Check if the file exists
+    if !config_path.exists() {
+        return Err(anyhow::anyhow!("Configuration file not found: {}", config_path.display()));
+    }
+
+    // Read and parse the configuration file
+    let config_content = fs::read_to_string(config_path)
+        .context(format!("Failed to read configuration file: {}", config_path.display()))?;
+    
+    let mut config: Config = toml::from_str(&config_content)
+        .context("Failed to parse configuration file")?;
+    
+    // Set project path to the parent directory of the config file
+    if let Some(parent) = config_path.parent() {
+        config.project_path = parent.to_path_buf();
+    } else {
+        config.project_path = std::env::current_dir()
+            .context("Failed to get current directory")?;
+    }
+    
+    Ok(config)
+}
+
+/// Create a default configuration
+fn create_default_config() -> Config {
+    Config {
+        project_path: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         github_repo: None,
-        ai_model: rust_ai_tool::AiModelConfig {
-            model_type: rust_ai_tool::AiModelType::Claude,
+        ai_model: AiModelConfig {
+            model_type: AiModelType::Claude,
             api_key: String::new(),
             api_base_url: None,
         },
-        analysis_options: rust_ai_tool::AnalysisOptions {
+        analysis_options: AnalysisOptions {
             run_clippy: true,
             use_rust_analyzer: true,
             custom_rules: Vec::new(),
         },
-        validation_options: rust_ai_tool::ValidationOptions {
+        validation_options: ValidationOptions {
             syntax_only: false,
             tauri_compatibility: true,
             security_validation: true,
         },
-    })
+    }
+}
+
+/// Format analysis results as the specified output format
+fn format_analysis_results(results: &[AnalysisResult], format: &str) -> Result<String> {
+    match format.to_lowercase().as_str() {
+        "json" => {
+            let json = serde_json::to_string_pretty(results)
+                .context("Failed to serialize analysis results to JSON")?;
+            Ok(json)
+        }
+        "markdown" => {
+            let mut markdown = String::new();
+            markdown.push_str("# Rust AI Tool Analysis Results\n\n");
+            
+            let issue_count: usize = results.iter()
+                .map(|r| r.issues.len())
+                .sum();
+            
+            markdown.push_str(&format!("**Total Issues Found**: {}\n\n", issue_count));
+            
+            for result in results {
+                if result.issues.is_empty() {
+                    continue;
+                }
+                
+                markdown.push_str(&format!("## {}\n\n", result.file_path.display()));
+                
+                for issue in &result.issues {
+                    markdown.push_str(&format!("### {}:{}-{}\n\n", 
+                        issue.file_path.display(),
+                        issue.line_start,
+                        issue.line_end
+                    ));
+                    
+                    markdown.push_str(&format!("**Category**: {}\n\n", format!("{:?}", issue.category)));
+                    markdown.push_str(&format!("**Severity**: {}\n\n", format!("{:?}", issue.severity)));
+                    markdown.push_str(&format!("**Message**: {}\n\n", issue.message));
+                    
+                    if let Some(fix) = &issue.suggested_fix {
+                        markdown.push_str("**Suggested Fix**:\n\n");
+                        markdown.push_str("```rust\n");
+                        markdown.push_str(&fix.replacement_code);
+                        markdown.push_str("\n```\n\n");
+                        markdown.push_str(&format!("Confidence: {}%\n\n", fix.confidence));
+                    }
+                    
+                    markdown.push_str("---\n\n");
+                }
+            }
+            
+            Ok(markdown)
+        }
+        "console" => {
+            let mut output = String::new();
+            let issue_count: usize = results.iter()
+                .map(|r| r.issues.len())
+                .sum();
+            
+            output.push_str(&format!("Total Issues Found: {}\n\n", issue_count));
+            
+            for result in results {
+                if result.issues.is_empty() {
+                    continue;
+                }
+                
+                output.push_str(&format!("File: {}\n", result.file_path.display()));
+                
+                for (i, issue) in result.issues.iter().enumerate() {
+                    output.push_str(&format!("Issue #{}: {}:{}-{} ({:?}, {:?})\n", 
+                        i + 1,
+                        issue.file_path.display(),
+                        issue.line_start,
+                        issue.line_end,
+                        issue.category,
+                        issue.severity
+                    ));
+                    
+                    output.push_str(&format!("  {}\n", issue.message));
+                    
+                    if let Some(fix) = &issue.suggested_fix {
+                        output.push_str("  Suggested Fix:\n");
+                        for line in fix.replacement_code.lines() {
+                            output.push_str(&format!("    {}\n", line));
+                        }
+                        output.push_str(&format!("  Confidence: {}%\n", fix.confidence));
+                    }
+                    
+                    output.push_str("\n");
+                }
+                
+                output.push_str("---\n\n");
+            }
+            
+            Ok(output)
+        }
+        _ => Err(anyhow::anyhow!("Unsupported output format: {}", format))
+    }
 }

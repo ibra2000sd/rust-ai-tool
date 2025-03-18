@@ -8,11 +8,13 @@
 //! - Structural integrity
 
 use crate::{RustAiToolError, ValidationOptions, Result};
-use ra_ap_syntax::{SourceFile, SyntaxNode};
+use ra_ap_syntax::{SourceFile, SyntaxNode, SyntaxKind};
 use std::path::{Path, PathBuf};
+use serde::{Serialize, Deserialize};
+use log::{debug, info, warn, error};
 
 /// Result of validating a fix
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationResult {
     /// Path to the file being validated
     pub file_path: PathBuf,
@@ -28,7 +30,7 @@ pub struct ValidationResult {
 }
 
 /// Message from validation
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationMessage {
     /// Type of validation message
     pub message_type: ValidationMessageType,
@@ -41,7 +43,7 @@ pub struct ValidationMessage {
 }
 
 /// Location in code
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeLocation {
     /// Line number
     pub line: usize,
@@ -51,7 +53,7 @@ pub struct CodeLocation {
 }
 
 /// Types of validation messages
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValidationMessageType {
     /// Error that prevents applying the fix
     Error,
@@ -63,8 +65,18 @@ pub enum ValidationMessageType {
     Info,
 }
 
+impl std::fmt::Display for ValidationMessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationMessageType::Error => write!(f, "ERROR"),
+            ValidationMessageType::Warning => write!(f, "WARNING"),
+            ValidationMessageType::Info => write!(f, "INFO"),
+        }
+    }
+}
+
 /// Severity of validation issues
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ValidationSeverity {
     /// Critical issue - must not apply the fix
     Critical,
@@ -79,8 +91,20 @@ pub enum ValidationSeverity {
     None,
 }
 
+impl ValidationSeverity {
+    /// Convert to a boolean for the is_valid field
+    pub fn is_valid(&self) -> bool {
+        match self {
+            ValidationSeverity::Critical => false,
+            ValidationSeverity::Major => false,
+            ValidationSeverity::Minor => true,
+            ValidationSeverity::None => true,
+        }
+    }
+}
+
 /// Represents a code fix to validate
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixToValidate {
     /// Path to the file to modify
     pub file_path: PathBuf,
@@ -95,6 +119,59 @@ pub struct FixToValidate {
     pub description: String,
 }
 
+/// Helper struct for partial validation results
+#[derive(Debug)]
+pub struct ValidationPartialResult {
+    pub messages: Vec<ValidationMessage>,
+    pub severity: ValidationSeverity,
+}
+
+impl ValidationPartialResult {
+    /// Create a new empty validation result
+    pub fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            severity: ValidationSeverity::None,
+        }
+    }
+    
+    /// Add a message to the result
+    pub fn add_message(&mut self, message_type: ValidationMessageType, text: String, location: Option<CodeLocation>) {
+        self.messages.push(ValidationMessage {
+            message_type,
+            text,
+            location,
+        });
+    }
+    
+    /// Add an error message
+    pub fn add_error(&mut self, text: String, location: Option<CodeLocation>) {
+        self.add_message(ValidationMessageType::Error, text, location);
+        if self.severity != ValidationSeverity::Critical {
+            self.severity = ValidationSeverity::Major;
+        }
+    }
+    
+    /// Add a critical error message
+    pub fn add_critical_error(&mut self, text: String, location: Option<CodeLocation>) {
+        self.add_message(ValidationMessageType::Error, text, location);
+        self.severity = ValidationSeverity::Critical;
+    }
+    
+    /// Add a warning message
+    pub fn add_warning(&mut self, text: String, location: Option<CodeLocation>) {
+        self.add_message(ValidationMessageType::Warning, text, location);
+        if self.severity == ValidationSeverity::None {
+            self.severity = ValidationSeverity::Minor;
+        }
+    }
+    
+    /// Add an info message
+    pub fn add_info(&mut self, text: String, location: Option<CodeLocation>) {
+        self.add_message(ValidationMessageType::Info, text, location);
+    }
+}
+
 /// Validates a list of suggested fixes
 ///
 /// # Arguments
@@ -106,14 +183,23 @@ pub struct FixToValidate {
 ///
 /// A list of validation results, one for each fix
 pub fn validate_fixes(fixes: &[FixToValidate], options: &ValidationOptions) -> Result<Vec<ValidationResult>> {
+    info!("Validating {} fixes", fixes.len());
     let mut results = Vec::new();
     
-    for fix in fixes {
+    for (i, fix) in fixes.iter().enumerate() {
+        debug!("Validating fix #{} for {}", i + 1, fix.file_path.display());
         match validate_fix(fix, options) {
-            Ok(result) => results.push(result),
+            Ok(result) => {
+                if result.is_valid {
+                    debug!("Fix #{} is valid", i + 1);
+                } else {
+                    warn!("Fix #{} is invalid: {:?}", i + 1, result.severity);
+                }
+                results.push(result);
+            },
             Err(e) => {
                 // Log error but continue with other fixes
-                log::error!("Failed to validate fix for {}: {}", fix.file_path.display(), e);
+                error!("Failed to validate fix for {}: {}", fix.file_path.display(), e);
                 results.push(ValidationResult {
                     file_path: fix.file_path.clone(),
                     is_valid: false,
@@ -141,7 +227,7 @@ pub fn validate_fixes(fixes: &[FixToValidate], options: &ValidationOptions) -> R
 /// # Returns
 ///
 /// Validation result for the fix
-fn validate_fix(fix: &FixToValidate, options: &ValidationOptions) -> Result<ValidationResult> {
+pub fn validate_fix(fix: &FixToValidate, options: &ValidationOptions) -> Result<ValidationResult> {
     let mut messages = Vec::new();
     let mut severity = ValidationSeverity::None;
     
@@ -210,60 +296,63 @@ fn validate_fix(fix: &FixToValidate, options: &ValidationOptions) -> Result<Vali
 
 /// Validates syntax of modified code
 fn validate_syntax(code: &str) -> ValidationPartialResult {
-    let mut messages = Vec::new();
-    let mut severity = ValidationSeverity::None;
+    let mut result = ValidationPartialResult::new();
     
     // Parse the modified code
     let parsed = SourceFile::parse(code);
     
     // Check for syntax errors
     let syntax = parsed.syntax_node();
-    let syntax_errors = syntax.descendants().filter(|node| node.kind() == ra_ap_syntax::SyntaxKind::ERROR);
+    let syntax_errors = syntax.descendants().filter(|node| node.kind() == SyntaxKind::ERROR);
     
-    for error in syntax_errors {
-        severity = ValidationSeverity::Critical;
-        
-        messages.push(ValidationMessage {
-            message_type: ValidationMessageType::Error,
-            text: format!("Syntax error at {:?}", error.text_range()),
-            location: None, // In a real implementation, calculate line/column
-        });
+    let error_count = syntax_errors.count();
+    if error_count > 0 {
+        result.add_critical_error(
+            format!("Found {} syntax errors in the modified code", error_count),
+            None,
+        );
+    } else {
+        result.add_info("Syntax validation passed".to_string(), None);
     }
     
-    ValidationPartialResult {
-        messages,
-        severity,
-    }
+    result
 }
 
 /// Validates semantic correctness
 fn validate_semantics(file_path: &Path, code: &str) -> ValidationPartialResult {
-    // In a real implementation, this would run rustc to check for semantic errors
-    // For now, we'll just return an empty result
+    let mut result = ValidationPartialResult::new();
     
-    ValidationPartialResult {
-        messages: Vec::new(),
-        severity: ValidationSeverity::None,
+    // This would ideally run rustc to check for semantic errors
+    // Since that's complex, we'll do some basic checks
+    
+    // Check for unresolved macros
+    if code.contains("unresolved_macro!") {
+        result.add_error("Code contains unresolved macros".to_string(), None);
     }
+    
+    // Check for TODO comments
+    if code.contains("TODO") || code.contains("FIXME") {
+        result.add_warning("Code contains TODO or FIXME comments".to_string(), None);
+    }
+    
+    // Add a success info message if no issues found
+    if result.severity == ValidationSeverity::None {
+        result.add_info("Semantic validation passed".to_string(), None);
+    }
+    
+    result
 }
 
 /// Validates structural integrity between original and modified code
 fn validate_structural_integrity(original: &str, modified: &str) -> ValidationPartialResult {
-    let mut messages = Vec::new();
-    let mut severity = ValidationSeverity::None;
+    let mut result = ValidationPartialResult::new();
     
     // Check for preservation of crate features
     let original_features = extract_features(original);
     let modified_features = extract_features(modified);
     
     if original_features != modified_features {
-        severity = ValidationSeverity::Major;
-        
-        messages.push(ValidationMessage {
-            message_type: ValidationMessageType::Error,
-            text: "Crate features were modified".to_string(),
-            location: None,
-        });
+        result.add_error("Crate features were modified".to_string(), None);
     }
     
     // Check for preservation of cfg attributes
@@ -271,64 +360,70 @@ fn validate_structural_integrity(original: &str, modified: &str) -> ValidationPa
     let modified_cfgs = extract_cfg_attributes(modified);
     
     if original_cfgs != modified_cfgs {
-        severity = ValidationSeverity::Major;
-        
-        messages.push(ValidationMessage {
-            message_type: ValidationMessageType::Error,
-            text: "Conditional compilation directives were modified".to_string(),
-            location: None,
-        });
+        result.add_error("Conditional compilation directives were modified".to_string(), None);
     }
     
-    ValidationPartialResult {
-        messages,
-        severity,
+    // Check for preservation of module structure
+    let original_mods = extract_modules(original);
+    let modified_mods = extract_modules(modified);
+    
+    for module in &original_mods {
+        if !modified_mods.contains(module) {
+            result.add_error(format!("Module '{}' was removed", module), None);
+        }
     }
+    
+    // Add a success info message if no issues found
+    if result.severity == ValidationSeverity::None {
+        result.add_info("Structural integrity validation passed".to_string(), None);
+    }
+    
+    result
 }
 
 /// Validates Tauri compatibility
 fn validate_tauri_compatibility(original: &str, modified: &str) -> ValidationPartialResult {
-    let mut messages = Vec::new();
-    let mut severity = ValidationSeverity::None;
+    let mut result = ValidationPartialResult::new();
     
     // Check Tauri command definitions
     let original_commands = extract_tauri_commands(original);
     let modified_commands = extract_tauri_commands(modified);
     
-    if original_commands != modified_commands {
-        severity = ValidationSeverity::Major;
-        
-        messages.push(ValidationMessage {
-            message_type: ValidationMessageType::Error,
-            text: "Tauri command definitions were modified".to_string(),
-            location: None,
-        });
+    for cmd in &original_commands {
+        if !modified_commands.contains(cmd) {
+            result.add_error(format!("Tauri command '{}' was removed", cmd), None);
+        }
     }
     
     // Check invoke handler registrations
     let original_handlers = extract_invoke_handlers(original);
     let modified_handlers = extract_invoke_handlers(modified);
     
-    if original_handlers != modified_handlers {
-        severity = ValidationSeverity::Major;
-        
-        messages.push(ValidationMessage {
-            message_type: ValidationMessageType::Error,
-            text: "Tauri invoke handler registrations were modified".to_string(),
-            location: None,
-        });
+    for handler in &original_handlers {
+        if !modified_handlers.contains(handler) {
+            result.add_error(format!("Tauri invoke handler '{}' was removed", handler), None);
+        }
     }
     
-    ValidationPartialResult {
-        messages,
-        severity,
+    // Check all commands are registered
+    for cmd in &modified_commands {
+        let is_registered = modified_handlers.iter().any(|h| h.contains(cmd));
+        if !is_registered {
+            result.add_warning(format!("Tauri command '{}' is not registered in any invoke_handler", cmd), None);
+        }
     }
+    
+    // Add a success info message if no issues found
+    if result.severity == ValidationSeverity::None {
+        result.add_info("Tauri compatibility validation passed".to_string(), None);
+    }
+    
+    result
 }
 
 /// Validates security implications
 fn validate_security_implications(original: &str, modified: &str) -> ValidationPartialResult {
-    let mut messages = Vec::new();
-    let mut severity = ValidationSeverity::None;
+    let mut result = ValidationPartialResult::new();
     
     // Check for security-critical functions
     let security_functions = [
@@ -346,27 +441,48 @@ fn validate_security_implications(original: &str, modified: &str) -> ValidationP
         let modified_calls = count_function_calls(modified, func);
         
         if original_calls != modified_calls {
-            severity = ValidationSeverity::Major;
-            
-            messages.push(ValidationMessage {
-                message_type: ValidationMessageType::Error,
-                text: format!("Security function '{}' calls were modified", func),
-                location: None,
-            });
+            result.add_error(format!("Security function '{}' calls were modified", func), None);
         }
     }
     
-    ValidationPartialResult {
-        messages,
-        severity,
+    // Check for new unsafe blocks
+    let original_unsafe = count_unsafe_blocks(original);
+    let modified_unsafe = count_unsafe_blocks(modified);
+    
+    if modified_unsafe > original_unsafe {
+        result.add_error(
+            format!("Added {} new unsafe blocks", modified_unsafe - original_unsafe),
+            None,
+        );
     }
-}
-
-/// Helper struct for partial validation results
-#[derive(Debug)]
-struct ValidationPartialResult {
-    messages: Vec<ValidationMessage>,
-    severity: ValidationSeverity,
+    
+    // Check for unwrap/expect on security operations
+    let sensitive_unwraps = [
+        r"verify.*\.unwrap\(\)",
+        r"auth.*\.unwrap\(\)",
+        r"decrypt.*\.unwrap\(\)",
+        r"\.verify.*\.unwrap\(\)",
+    ];
+    
+    for pattern in &sensitive_unwraps {
+        let re = regex::Regex::new(pattern).unwrap();
+        let original_count = re.find_iter(original).count();
+        let modified_count = re.find_iter(modified).count();
+        
+        if modified_count > original_count {
+            result.add_error(
+                format!("Added unwrap() on security-sensitive operation matching '{}'", pattern),
+                None,
+            );
+        }
+    }
+    
+    // Add a success info message if no issues found
+    if result.severity == ValidationSeverity::None {
+        result.add_info("Security validation passed".to_string(), None);
+    }
+    
+    result
 }
 
 /// Extracts crate features from code
@@ -393,6 +509,27 @@ fn extract_cfg_attributes(code: &str) -> Vec<String> {
         .captures_iter(code)
         .map(|cap| cap[1].to_string())
         .collect()
+}
+
+/// Extracts module declarations from code
+fn extract_modules(code: &str) -> Vec<String> {
+    // In a real implementation, this would use actual AST parsing
+    // For now, we'll use a simple regex approach
+    
+    let mod_regex = regex::Regex::new(r"mod\s+([a-zA-Z0-9_]+)\s*;").unwrap();
+    let mod_block_regex = regex::Regex::new(r"mod\s+([a-zA-Z0-9_]+)\s*\{").unwrap();
+    
+    let mut modules = Vec::new();
+    
+    for cap in mod_regex.captures_iter(code) {
+        modules.push(cap[1].to_string());
+    }
+    
+    for cap in mod_block_regex.captures_iter(code) {
+        modules.push(cap[1].to_string());
+    }
+    
+    modules
 }
 
 /// Extracts Tauri commands from code
@@ -429,6 +566,16 @@ fn count_function_calls(code: &str, function_name: &str) -> usize {
     let call_regex = regex::Regex::new(&format!(r"{}\s*\(", function_name)).unwrap();
     
     call_regex.captures_iter(code).count()
+}
+
+/// Counts unsafe blocks in code
+fn count_unsafe_blocks(code: &str) -> usize {
+    // In a real implementation, this would use actual AST parsing
+    // For now, we'll use a simple regex approach
+    
+    let unsafe_regex = regex::Regex::new(r"unsafe\s*\{").unwrap();
+    
+    unsafe_regex.captures_iter(code).count()
 }
 
 /// Checks if a file is part of a Tauri project

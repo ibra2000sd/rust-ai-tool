@@ -12,6 +12,7 @@ pub mod cli;
 pub mod github;
 pub mod models;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Errors that can occur in the Rust AI Tool
@@ -58,9 +59,10 @@ pub enum RustAiToolError {
 pub type Result<T> = std::result::Result<T, RustAiToolError>;
 
 /// Core configuration for the Rust AI Tool
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Path to the Rust project to analyze
+    #[serde(skip)]
     pub project_path: std::path::PathBuf,
     
     /// GitHub repository information (if enabled)
@@ -77,7 +79,7 @@ pub struct Config {
 }
 
 /// GitHub repository information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubRepo {
     /// GitHub repository owner
     pub owner: String,
@@ -90,7 +92,7 @@ pub struct GitHubRepo {
 }
 
 /// AI model configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiModelConfig {
     /// Type of AI model to use
     pub model_type: AiModelType,
@@ -103,7 +105,7 @@ pub struct AiModelConfig {
 }
 
 /// Supported AI model types
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AiModelType {
     /// Claude AI model
     Claude,
@@ -119,7 +121,7 @@ pub enum AiModelType {
 }
 
 /// Options for code analysis
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisOptions {
     /// Whether to run Clippy
     pub run_clippy: bool,
@@ -128,11 +130,12 @@ pub struct AnalysisOptions {
     pub use_rust_analyzer: bool,
     
     /// Custom rules to apply during analysis
+    #[serde(default)]
     pub custom_rules: Vec<CustomRule>,
 }
 
 /// Options for validation of suggested fixes
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationOptions {
     /// Whether to validate syntax only
     pub syntax_only: bool,
@@ -145,7 +148,7 @@ pub struct ValidationOptions {
 }
 
 /// Custom analysis rule
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomRule {
     /// Name of the rule
     pub name: String,
@@ -161,7 +164,7 @@ pub struct CustomRule {
 }
 
 /// Severity of an issue or rule
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Severity {
     /// Error - must be fixed
     Error,

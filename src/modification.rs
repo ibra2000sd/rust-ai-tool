@@ -10,9 +10,11 @@ use crate::{Result, RustAiToolError};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use log::{debug, info, warn, error};
+use serde::{Serialize, Deserialize};
 
 /// Represents a code modification
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeModification {
     /// Path to the file to modify
     pub file_path: PathBuf,
@@ -31,7 +33,7 @@ pub struct CodeModification {
 }
 
 /// Represents a change in a file
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {
     /// Path to the file
     pub file_path: PathBuf,
@@ -66,13 +68,18 @@ pub fn apply_modifications(
     modifications: &[CodeModification],
     create_backup: bool,
 ) -> Result<Vec<FileChange>> {
+    info!("Applying {} modifications with backup={}", modifications.len(), create_backup);
     let mut changes = Vec::new();
     
-    for modification in modifications {
+    for (i, modification) in modifications.iter().enumerate() {
+        debug!("Applying modification #{} to {}", i + 1, modification.file_path.display());
         match apply_modification(modification, create_backup) {
-            Ok(change) => changes.push(change),
+            Ok(change) => {
+                info!("Successfully applied modification to {}", modification.file_path.display());
+                changes.push(change);
+            },
             Err(e) => {
-                log::error!(
+                error!(
                     "Failed to apply modification to {}: {}",
                     modification.file_path.display(),
                     e
@@ -82,6 +89,7 @@ pub fn apply_modifications(
         }
     }
     
+    info!("Successfully applied {} modifications", changes.len());
     Ok(changes)
 }
 
@@ -126,6 +134,7 @@ fn apply_modification(
         let backup_file = file_path.with_extension("bak");
         fs::write(&backup_file, &current_content)
             .map_err(|e| RustAiToolError::Io(e))?;
+        debug!("Created backup at {}", backup_file.display());
         Some(backup_file)
     } else {
         None
@@ -143,6 +152,60 @@ fn apply_modification(
         backup_created: backup_path.is_some(),
         backup_path,
     })
+}
+
+/// Apply validated fixes
+///
+/// # Arguments
+///
+/// * `modifications` - List of all modifications
+/// * `validation_results` - List of validation results
+/// * `create_backup` - Whether to create backups
+///
+/// # Returns
+///
+/// List of applied changes
+pub fn apply_validated_fixes(
+    modifications: &[CodeModification],
+    validation_results: &[crate::validation::ValidationResult],
+    create_backup: bool,
+) -> Result<Vec<FileChange>> {
+    // Filter modifications based on validation results
+    let valid_modifications: Vec<&CodeModification> = modifications.iter()
+        .zip(validation_results.iter())
+        .filter(|(_, validation)| validation.is_valid)
+        .map(|(modification, _)| modification)
+        .collect();
+    
+    // Log stats
+    let valid_count = valid_modifications.len();
+    let total_count = modifications.len();
+    info!("Applying {}/{} validated fixes", valid_count, total_count);
+    
+    if valid_count < total_count {
+        let invalid_count = total_count - valid_count;
+        warn!("Skipping {} invalid modifications", invalid_count);
+    }
+    
+    // Apply only the valid modifications
+    let mut changes = Vec::new();
+    for modification in valid_modifications {
+        match apply_modification(modification, create_backup) {
+            Ok(change) => {
+                changes.push(change);
+            },
+            Err(e) => {
+                error!(
+                    "Failed to apply validated modification to {}: {}",
+                    modification.file_path.display(),
+                    e
+                );
+                return Err(e);
+            }
+        }
+    }
+    
+    Ok(changes)
 }
 
 /// Creates a detailed report of changes
@@ -168,23 +231,9 @@ pub fn create_change_report(changes: &[FileChange]) -> String {
             report.push_str("### Changes\n\n");
             report.push_str("```diff\n");
             
-            // Create a simple diff
-            let original_lines: Vec<&str> = original.lines().collect();
-            let new_lines: Vec<&str> = change.new_content.lines().collect();
-            
-            // Very simple diff algorithm
-            for i in 0..original_lines.len().max(new_lines.len()) {
-                if i < original_lines.len() && i < new_lines.len() {
-                    if original_lines[i] != new_lines[i] {
-                        report.push_str(&format!("- {}\n", original_lines[i]));
-                        report.push_str(&format!("+ {}\n", new_lines[i]));
-                    }
-                } else if i < original_lines.len() {
-                    report.push_str(&format!("- {}\n", original_lines[i]));
-                } else if i < new_lines.len() {
-                    report.push_str(&format!("+ {}\n", new_lines[i]));
-                }
-            }
+            // Generate a simple diff
+            let diff = generate_diff(original, &change.new_content);
+            report.push_str(&diff);
             
             report.push_str("```\n\n");
         }
@@ -200,6 +249,43 @@ pub fn create_change_report(changes: &[FileChange]) -> String {
     }
     
     report
+}
+
+/// Generate a simple diff between two strings
+///
+/// # Arguments
+///
+/// * `original` - Original text
+/// * `modified` - Modified text
+///
+/// # Returns
+///
+/// Diff in unified format
+fn generate_diff(original: &str, modified: &str) -> String {
+    // This is a simple implementation
+    // A real implementation would use a proper diff algorithm
+    let original_lines: Vec<&str> = original.lines().collect();
+    let modified_lines: Vec<&str> = modified.lines().collect();
+    
+    let mut diff = String::new();
+    
+    // Simple line-by-line comparison
+    for i in 0..original_lines.len().max(modified_lines.len()) {
+        if i < original_lines.len() && i < modified_lines.len() {
+            if original_lines[i] != modified_lines[i] {
+                diff.push_str(&format!("- {}\n", original_lines[i]));
+                diff.push_str(&format!("+ {}\n", modified_lines[i]));
+            } else {
+                diff.push_str(&format!("  {}\n", original_lines[i]));
+            }
+        } else if i < original_lines.len() {
+            diff.push_str(&format!("- {}\n", original_lines[i]));
+        } else if i < modified_lines.len() {
+            diff.push_str(&format!("+ {}\n", modified_lines[i]));
+        }
+    }
+    
+    diff
 }
 
 /// Restore files from backups
@@ -229,6 +315,9 @@ pub fn restore_backups(changes: &[FileChange]) -> Result<usize> {
                 fs::remove_file(backup_path).map_err(|e| RustAiToolError::Io(e))?;
                 
                 restored += 1;
+                info!("Restored {} from backup", change.file_path.display());
+            } else {
+                warn!("Backup file not found: {}", backup_path.display());
             }
         }
     }
@@ -267,7 +356,7 @@ pub fn apply_file_changes(
         
         // Skip if the content is already the same
         if current_content == *new_content {
-            log::info!("Skipping {} - content unchanged", file_path.display());
+            info!("Skipping {} - content unchanged", file_path.display());
             continue;
         }
         
@@ -276,6 +365,7 @@ pub fn apply_file_changes(
             let backup_file = file_path.with_extension("bak");
             fs::write(&backup_file, &current_content)
                 .map_err(|e| RustAiToolError::Io(e))?;
+            info!("Created backup at {}", backup_file.display());
             Some(backup_file)
         } else {
             None
@@ -284,6 +374,8 @@ pub fn apply_file_changes(
         // Write the new content
         fs::write(file_path, new_content)
             .map_err(|e| RustAiToolError::Io(e))?;
+        
+        info!("Updated {}", file_path.display());
         
         file_changes.push(FileChange {
             file_path: file_path.clone(),
@@ -336,6 +428,7 @@ pub fn update_code_section(
         let backup_file = file_path.with_extension("bak");
         fs::write(&backup_file, &current_content)
             .map_err(|e| RustAiToolError::Io(e))?;
+        debug!("Created backup at {}", backup_file.display());
         Some(backup_file)
     } else {
         None
@@ -345,6 +438,8 @@ pub fn update_code_section(
     fs::write(file_path, &new_content)
         .map_err(|e| RustAiToolError::Io(e))?;
     
+    info!("Updated section in {}", file_path.display());
+    
     Ok(FileChange {
         file_path: file_path.to_path_buf(),
         original_content: Some(current_content),
@@ -353,4 +448,75 @@ pub fn update_code_section(
         backup_created: backup_path.is_some(),
         backup_path,
     })
+}
+
+/// Create a code modification from original and modified content
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the file
+/// * `original_content` - Original content
+/// * `modified_content` - Modified content
+/// * `description` - Description of the modification
+/// * `confidence` - Confidence level (0-100)
+///
+/// # Returns
+///
+/// Code modification
+pub fn create_modification(
+    file_path: PathBuf,
+    original_content: String,
+    modified_content: String,
+    description: String,
+    confidence: u8,
+) -> CodeModification {
+    CodeModification {
+        file_path,
+        original_content,
+        modified_content,
+        description,
+        confidence,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    
+    #[test]
+    fn test_apply_modification() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.rs");
+        
+        let original_content = "fn main() {\n    println!(\"Hello\");\n}";
+        fs::write(&file_path, original_content).unwrap();
+        
+        let modified_content = "fn main() {\n    println!(\"Hello, world!\");\n}";
+        
+        let modification = CodeModification {
+            file_path: file_path.clone(),
+            original_content: original_content.to_string(),
+            modified_content: modified_content.to_string(),
+            description: "Update greeting".to_string(),
+            confidence: 90,
+        };
+        
+        let change = apply_modification(&modification, true).unwrap();
+        
+        assert_eq!(change.file_path, file_path);
+        assert_eq!(change.original_content, Some(original_content.to_string()));
+        assert_eq!(change.new_content, modified_content);
+        assert!(change.backup_created);
+        assert!(change.backup_path.is_some());
+        
+        // Check that the file was updated
+        let updated_content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(updated_content, modified_content);
+        
+        // Check that the backup was created
+        let backup_path = file_path.with_extension("bak");
+        let backup_content = fs::read_to_string(&backup_path).unwrap();
+        assert_eq!(backup_content, original_content);
+    }
 }
