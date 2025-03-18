@@ -1,27 +1,8 @@
-//! Command-line interface module
-//!
-//! This module provides functionality for the CLI interface:
-//! - Command execution
-//! - Terminal UI
-//! - Progress reporting
-//! - User interaction
-
 use crate::{Result, RustAiToolError};
-use std::path::Path;
-use log::{debug, info, warn, error};
-use serde::{Serialize, Deserialize};
+use std::path::{Path, PathBuf};
+use log::{debug, info, warn};
 use tokio::fs;
 
-/// Execute a CLI command
-///
-/// # Arguments
-///
-/// * `command` - Command to execute
-/// * `args` - Command arguments
-///
-/// # Returns
-///
-/// Success status
 pub async fn execute_command(command: &str, args: &[&str]) -> Result<String> {
     debug!("Executing command: {} with args: {:?}", command, args);
     
@@ -71,7 +52,7 @@ pub async fn execute_command(command: &str, args: &[&str]) -> Result<String> {
                             "github clone command requires owner, repo, and target directory".to_string(),
                         ));
                     }
-                    github_clone(args[1], args[2], args.get(3).copied()).await
+                    github_clone(args[1], args[2], args.get(3).copied().unwrap_or(".")).await
                 }
                 "create-pr" => {
                     if args.len() < 5 {
@@ -92,26 +73,13 @@ pub async fn execute_command(command: &str, args: &[&str]) -> Result<String> {
     }
 }
 
-/// Analyze a Rust project
-///
-/// # Arguments
-///
-/// * `project_path` - Path to the project
-/// * `output_format` - Output format (json, markdown, console)
-///
-/// # Returns
-///
-/// Analysis results
 async fn analyze_project(project_path: &str, output_format: &str) -> Result<String> {
     info!("Analyzing project at {} with output format {}", project_path, output_format);
     
-    // Load the configuration
     let config = load_config_for_path(project_path).await?;
     
-    // Run the analysis
     let results = crate::analysis::analyze_project(Path::new(project_path), &config.analysis_options)?;
     
-    // Format the results
     let output = match output_format {
         "json" => serde_json::to_string_pretty(&results)
             .map_err(|e| RustAiToolError::Other(format!("Failed to serialize results: {}", e)))?,
@@ -123,25 +91,14 @@ async fn analyze_project(project_path: &str, output_format: &str) -> Result<Stri
     Ok(output)
 }
 
-/// Format analysis results as markdown
-///
-/// # Arguments
-///
-/// * `results` - Analysis results
-///
-/// # Returns
-///
-/// Markdown-formatted results
 fn format_analysis_results_markdown(results: &[crate::analysis::AnalysisResult]) -> String {
     let mut markdown = String::new();
     
     markdown.push_str("# Rust AI Tool Analysis Results\n\n");
     
-    // Count total issues
     let total_issues: usize = results.iter().map(|r| r.issues.len()).sum();
     markdown.push_str(&format!("**Total Issues Found**: {}\n\n", total_issues));
     
-    // Process each file
     for result in results {
         if result.issues.is_empty() {
             continue;
@@ -149,7 +106,6 @@ fn format_analysis_results_markdown(results: &[crate::analysis::AnalysisResult])
         
         markdown.push_str(&format!("## {}\n\n", result.file_path.display()));
         
-        // Process each issue
         for issue in &result.issues {
             markdown.push_str(&format!("### Issue at {}:{}-{}\n\n", 
                 issue.file_path.display(), 
@@ -176,26 +132,15 @@ fn format_analysis_results_markdown(results: &[crate::analysis::AnalysisResult])
     markdown
 }
 
-/// Format analysis results for console output
-///
-/// # Arguments
-///
-/// * `results` - Analysis results
-///
-/// # Returns
-///
-/// Console-formatted results
 fn format_analysis_results_console(results: &[crate::analysis::AnalysisResult]) -> String {
     let mut output = String::new();
     
-    // Count total issues
     let total_issues: usize = results.iter().map(|r| r.issues.len()).sum();
     output.push_str(&format!("Found {} issues in {} files\n\n", 
         total_issues,
         results.iter().filter(|r| !r.issues.is_empty()).count()
     ));
     
-    // Process each file
     for result in results {
         if result.issues.is_empty() {
             continue;
@@ -203,7 +148,6 @@ fn format_analysis_results_console(results: &[crate::analysis::AnalysisResult]) 
         
         output.push_str(&format!("File: {}\n", result.file_path.display()));
         
-        // Process each issue
         for (i, issue) in result.issues.iter().enumerate() {
             output.push_str(&format!("  Issue #{}: {}:{}-{} ({:?}, {:?})\n", 
                 i + 1,
@@ -219,7 +163,6 @@ fn format_analysis_results_console(results: &[crate::analysis::AnalysisResult]) 
             if let Some(fix) = &issue.suggested_fix {
                 output.push_str("    Suggested Fix:\n");
                 
-                // Format the replacement code with indentation
                 for line in fix.replacement_code.lines() {
                     output.push_str(&format!("      {}\n", line));
                 }
@@ -236,23 +179,11 @@ fn format_analysis_results_console(results: &[crate::analysis::AnalysisResult]) 
     output
 }
 
-/// Validate suggested fixes
-///
-/// # Arguments
-///
-/// * `project_path` - Path to the project
-/// * `fixes_path` - Path to the fixes file
-///
-/// # Returns
-///
-/// Validation results
 async fn validate_fixes(project_path: &str, fixes_path: &str) -> Result<String> {
     info!("Validating fixes for project at {} using {}", project_path, fixes_path);
     
-    // Load the configuration
     let config = load_config_for_path(project_path).await?;
     
-    // Load the fixes
     let fixes_content = fs::read_to_string(fixes_path)
         .await
         .map_err(|e| RustAiToolError::Io(e))?;
@@ -260,34 +191,21 @@ async fn validate_fixes(project_path: &str, fixes_path: &str) -> Result<String> 
     let fixes: Vec<crate::validation::FixToValidate> = serde_json::from_str(&fixes_content)
         .map_err(|e| RustAiToolError::Json(e))?;
     
-    // Validate the fixes
     let validation_results = crate::validation::validate_fixes(&fixes, &config.validation_options)?;
     
-    // Format the results
     let output = format_validation_results(&validation_results);
     
     Ok(output)
 }
 
-/// Format validation results
-///
-/// # Arguments
-///
-/// * `results` - Validation results
-///
-/// # Returns
-///
-/// Formatted results
 fn format_validation_results(results: &[crate::validation::ValidationResult]) -> String {
     let mut output = String::new();
     
-    // Count valid and invalid fixes
     let valid_count = results.iter().filter(|r| r.is_valid).count();
     let total_count = results.len();
     
     output.push_str(&format!("Validation Results: {}/{} fixes are valid\n\n", valid_count, total_count));
     
-    // Process each result
     for (i, result) in results.iter().enumerate() {
         output.push_str(&format!("Fix #{} for {}: {}\n", 
             i + 1,
@@ -311,22 +229,10 @@ fn format_validation_results(results: &[crate::validation::ValidationResult]) ->
     output
 }
 
-/// Apply suggested fixes
-///
-/// # Arguments
-///
-/// * `project_path` - Path to the project
-/// * `fixes_path` - Path to the fixes file
-/// * `create_backup` - Whether to create backups
-///
-/// # Returns
-///
-/// Application results
 async fn apply_fixes(project_path: &str, fixes_path: &str, create_backup: bool) -> Result<String> {
     info!("Applying fixes to project at {} using {} (backup={})", 
           project_path, fixes_path, create_backup);
     
-    // Load the fixes
     let fixes_content = fs::read_to_string(fixes_path)
         .await
         .map_err(|e| RustAiToolError::Io(e))?;
@@ -334,33 +240,18 @@ async fn apply_fixes(project_path: &str, fixes_path: &str, create_backup: bool) 
     let modifications: Vec<crate::modification::CodeModification> = serde_json::from_str(&fixes_content)
         .map_err(|e| RustAiToolError::Json(e))?;
     
-    // Apply the modifications
     let changes = crate::modification::apply_modifications(&modifications, create_backup)?;
     
-    // Generate a report
     let report = crate::modification::create_change_report(&changes);
     
     Ok(report)
 }
 
-/// Generate a Rust project
-///
-/// # Arguments
-///
-/// * `description` - Project description
-/// * `output_dir` - Output directory
-/// * `name` - Project name
-///
-/// # Returns
-///
-/// Generation results
 async fn generate_project(description: &str, output_dir: &str, name: &str) -> Result<String> {
     info!("Generating project '{}' at {} from description", name, output_dir);
     
-    // Load default config for AI model
     let config = load_default_config().await?;
     
-    // Generate the project
     let project_path = crate::project_generator::generate_project_from_description(
         description,
         Path::new(output_dir),
@@ -371,82 +262,50 @@ async fn generate_project(description: &str, output_dir: &str, name: &str) -> Re
     Ok(format!("Project generated successfully at {}", project_path.display()))
 }
 
-/// Clone a GitHub repository
-///
-/// # Arguments
-///
-/// * `owner` - Repository owner
-/// * `repo` - Repository name
-/// * `target_dir` - Target directory
-///
-/// # Returns
-///
-/// Clone results
-async fn github_clone(owner: &str, repo: &str, target_dir: Option<&str>) -> Result<String> {
+async fn github_clone(owner: &str, repo: &str, target_dir: &str) -> Result<String> {
     info!("Cloning GitHub repository {}/{}", owner, repo);
     
-    // Load config to get GitHub token
     let config = load_default_config().await?;
     
     let github_config = config.github_repo.ok_or_else(|| {
         RustAiToolError::GitHub("GitHub configuration not found in config file".to_string())
     })?;
     
-    // Create GitHub client
     let client = crate::github::GithubClient::new(
         &github_config.access_token,
         owner,
         repo,
     )?;
     
-    // Clone the repository
-    let target = target_dir.unwrap_or(".");
-    let repo_path = client.clone_repo(None, Path::new(target)).await?;
+    let repo_path = client.clone_repo(None, Path::new(target_dir)).await?;
     
     Ok(format!("Repository cloned to {}", repo_path.display()))
 }
 
-/// Create a GitHub pull request
-///
-/// # Arguments
-///
-/// * `owner` - Repository owner
-/// * `repo` - Repository name
-/// * `branch` - Branch name
-/// * `title` - Pull request title
-/// * `fixes_path` - Path to fixes file
-///
-/// # Returns
-///
-/// Pull request results
 async fn github_create_pr(
     owner: &str,
     repo: &str,
     branch: &str,
     title: &str,
-    fixes_path: &str,
+    fixes_path: Option<&str>,
 ) -> Result<String> {
     info!("Creating GitHub PR for {}/{} on branch {} with title: {}", 
           owner, repo, branch, title);
     
-    // Load config to get GitHub token
     let config = load_default_config().await?;
     
     let github_config = config.github_repo.ok_or_else(|| {
         RustAiToolError::GitHub("GitHub configuration not found in config file".to_string())
     })?;
     
-    // Create GitHub client
     let client = crate::github::GithubClient::new(
         &github_config.access_token,
         owner,
         repo,
     )?;
     
-    // Get repository info to determine default branch
     let repo_info = client.get_repo_info().await?;
     
-    // Create a new branch if it doesn't exist
     let default_branch = &repo_info.default_branch;
     info!("Creating branch {} from {}", branch, default_branch);
     
@@ -455,83 +314,71 @@ async fn github_create_pr(
         Err(e) => warn!("Failed to create branch (it may already exist): {}", e),
     }
     
-    // Clone the repository to a temporary directory
-    let temp_dir = tempfile::tempdir()
-        .map_err(|e| RustAiToolError::Other(format!("Failed to create temporary directory: {}", e)))?;
+    let temp_dir = match std::env::temp_dir().to_str() {
+        Some(dir) => dir.to_string(),
+        None => return Err(RustAiToolError::Other("Failed to get temporary directory".to_string())),
+    };
     
-    let repo_path = client.clone_repo(Some(branch), temp_dir.path()).await?;
+    let repo_path = client.clone_repo(Some(branch), Path::new(&temp_dir)).await?;
     
-    // Load the fixes
-    let fixes_content = fs::read_to_string(fixes_path)
-        .await
-        .map_err(|e| RustAiToolError::Io(e))?;
-    
-    let modifications: Vec<crate::modification::CodeModification> = serde_json::from_str(&fixes_content)
-        .map_err(|e| RustAiToolError::Json(e))?;
-    
-    // Apply modifications to the local repository
-    let paths: Vec<_> = modifications.iter()
-        .map(|m| &m.file_path)
-        .collect();
-    
-    // Log the files that will be modified
-    info!("Modifying files:");
-    for path in &paths {
-        info!("  {}", path.display());
-    }
-    
-    // Make path adjustments - if file_path is absolute, make it relative to the repo
-    let mut files_to_commit = Vec::new();
-    for modification in &modifications {
-        let file_path = &modification.file_path;
-        let target_path = if file_path.is_absolute() {
-            // Try to make it relative to the repo
-            let file_name = file_path.file_name().ok_or_else(|| {
-                RustAiToolError::Modification(format!("Invalid file path: {}", file_path.display()))
-            })?;
-            
-            let target = repo_path.join(file_name);
-            
-            // Write the modified content
-            fs::write(&target, &modification.modified_content)
-                .await
-                .map_err(|e| RustAiToolError::Io(e))?;
-            
-            target
-        } else {
-            // The path is already relative, so just join it with the repo path
-            let target = repo_path.join(file_path);
-            
-            // Create parent directories if they don't exist
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)
+    if let Some(fixes_path_str) = fixes_path {
+        let fixes_content = fs::read_to_string(fixes_path_str)
+            .await
+            .map_err(|e| RustAiToolError::Io(e))?;
+        
+        let modifications: Vec<crate::modification::CodeModification> = serde_json::from_str(&fixes_content)
+            .map_err(|e| RustAiToolError::Json(e))?;
+        
+        info!("Modifying files:");
+        for modification in &modifications {
+            info!("  {}", modification.file_path.display());
+        }
+        
+        let mut files_to_commit = Vec::new();
+        for modification in &modifications {
+            let file_path = &modification.file_path;
+            let target_path = if file_path.is_absolute() {
+                let file_name = file_path.file_name().ok_or_else(|| {
+                    RustAiToolError::Modification(format!("Invalid file path: {}", file_path.display()))
+                })?;
+                
+                let target = repo_path.join(file_name);
+                
+                fs::write(&target, &modification.modified_content)
                     .await
                     .map_err(|e| RustAiToolError::Io(e))?;
-            }
+                
+                target
+            } else {
+                let target = repo_path.join(file_path);
+                
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| RustAiToolError::Io(e))?;
+                }
+                
+                fs::write(&target, &modification.modified_content)
+                    .await
+                    .map_err(|e| RustAiToolError::Io(e))?;
+                
+                target
+            };
             
-            // Write the modified content
-            fs::write(&target, &modification.modified_content)
-                .await
-                .map_err(|e| RustAiToolError::Io(e))?;
-            
-            target
-        };
+            files_to_commit.push(target_path);
+        }
         
-        files_to_commit.push(target_path);
+        client.commit_changes(
+            &repo_path,
+            &files_to_commit,
+            &format!("Applied fixes: {}", title),
+            branch,
+        ).await?;
     }
     
-    // Commit and push changes
-    client.commit_changes(
-        &repo_path,
-        &files_to_commit,
-        &format!("Applied fixes: {}", title),
-        branch,
-    ).await?;
-    
-    // Create pull request
     let pr = client.create_pull_request(
         title,
-        &format!("Automated fixes by Rust AI Tool\n\nApplied {} fixes", modifications.len()),
+        &format!("Automated fixes by Rust AI Tool\n\nApplied fixes"),
         branch,
         &repo_info.default_branch,
     ).await?;
@@ -539,34 +386,21 @@ async fn github_create_pr(
     Ok(format!("Pull request created: {}", pr.url))
 }
 
-/// Initialize a configuration file
-///
-/// # Arguments
-///
-/// * `project_path` - Path to the project
-///
-/// # Returns
-///
-/// Initialization results
 async fn init_config(project_path: &str) -> Result<String> {
     info!("Initializing configuration for project at {}", project_path);
     
     let config_path = Path::new(project_path).join(".rust-ai-tool.toml");
     
-    // Check if the file already exists
     if config_path.exists() {
         warn!("Configuration file already exists at {}", config_path.display());
         return Ok(format!("Configuration file already exists at {}", config_path.display()));
     }
     
-    // Create a default configuration
     let config = create_default_config();
     
-    // Serialize the configuration
     let config_content = toml::to_string_pretty(&config)
         .map_err(|e| RustAiToolError::Other(format!("Failed to serialize configuration: {}", e)))?;
     
-    // Write the configuration file
     fs::write(&config_path, config_content)
         .await
         .map_err(|e| RustAiToolError::Io(e))?;
@@ -574,15 +408,6 @@ async fn init_config(project_path: &str) -> Result<String> {
     Ok(format!("Configuration file created at {}", config_path.display()))
 }
 
-/// Load configuration for a project path
-///
-/// # Arguments
-///
-/// * `project_path` - Path to the project
-///
-/// # Returns
-///
-/// Project configuration
 async fn load_config_for_path(project_path: &str) -> Result<crate::Config> {
     let config_path = Path::new(project_path).join(".rust-ai-tool.toml");
     
@@ -594,12 +419,10 @@ async fn load_config_for_path(project_path: &str) -> Result<crate::Config> {
         let mut config: crate::Config = toml::from_str(&config_content)
             .map_err(|e| RustAiToolError::Other(format!("Failed to parse configuration: {}", e)))?;
         
-        // Set the project path
         config.project_path = Path::new(project_path).to_path_buf();
         
         Ok(config)
     } else {
-        // If no config file exists, create a default one
         let mut config = create_default_config();
         config.project_path = Path::new(project_path).to_path_buf();
         
@@ -607,24 +430,13 @@ async fn load_config_for_path(project_path: &str) -> Result<crate::Config> {
     }
 }
 
-/// Load default configuration
-///
-/// # Returns
-///
-/// Default configuration
 async fn load_default_config() -> Result<crate::Config> {
-    // Check if config exists in current directory
     let current_dir = std::env::current_dir()
         .map_err(|e| RustAiToolError::Io(e))?;
     
     load_config_for_path(current_dir.to_str().unwrap_or(".")).await
 }
 
-/// Create a default configuration
-///
-/// # Returns
-///
-/// Default configuration
 fn create_default_config() -> crate::Config {
     crate::Config {
         project_path: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -647,34 +459,11 @@ fn create_default_config() -> crate::Config {
     }
 }
 
-/// Create interactive terminal UI for the application
-///
-/// # Returns
-///
-/// Success status
 pub fn create_terminal_ui() -> Result<()> {
-    // This is a placeholder for a terminal UI
-    // In a real implementation, this would create a more sophisticated UI
-    // using a library like tui-rs
-    
     Ok(())
 }
 
-/// Display progress for long-running operations
-///
-/// # Arguments
-///
-/// * `operation` - Operation description
-/// * `total` - Total number of steps
-///
-/// # Returns
-///
-/// Progress handler
 pub fn create_progress_display(operation: &str, total: u64) -> Result<ProgressHandler> {
-    // This is a placeholder for a progress display
-    // In a real implementation, this would create a more sophisticated progress bar
-    // using a library like indicatif
-    
     println!("Starting {}...", operation);
     
     Ok(ProgressHandler {
@@ -684,24 +473,13 @@ pub fn create_progress_display(operation: &str, total: u64) -> Result<ProgressHa
     })
 }
 
-/// Progress handler for long-running operations
 pub struct ProgressHandler {
-    /// Operation description
     operation: String,
-    
-    /// Total number of steps
     total: u64,
-    
-    /// Current step
     current: u64,
 }
 
 impl ProgressHandler {
-    /// Update progress
-    ///
-    /// # Arguments
-    ///
-    /// * `current` - Current step
     pub fn update(&mut self, current: u64) {
         self.current = current;
         
@@ -714,12 +492,10 @@ impl ProgressHandler {
         println!("{}: {}% ({}/{})", self.operation, percentage, self.current, self.total);
     }
     
-    /// Increment progress
     pub fn increment(&mut self) {
         self.update(self.current + 1);
     }
     
-    /// Complete progress
     pub fn complete(&mut self) {
         self.update(self.total);
         println!("{} completed.", self.operation);
@@ -729,17 +505,19 @@ impl ProgressHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     
     #[tokio::test]
     async fn test_init_config() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().to_str().unwrap();
+        let dir = std::env::temp_dir();
+        let path = dir.to_str().unwrap();
         
         let result = init_config(path).await.unwrap();
         assert!(result.contains("Configuration file created"));
         
         let config_path = Path::new(path).join(".rust-ai-tool.toml");
         assert!(config_path.exists());
+        
+        // Clean up
+        fs::remove_file(config_path).await.ok();
     }
 }
